@@ -1,0 +1,11 @@
+{
+  "listen": ":20129",
+  "upstream": "http://localhost:20128",
+  "upstream_key": "sk-YOUR-9ROUTER-KEY",
+  "keys": {
+    "sk-gate-CHANGE-ME-random": {
+      "name": "budi",
+      "models": ["kr/claude-sonnet-4.5", "oc/*"]
+    }
+  }
+}
