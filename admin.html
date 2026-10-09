@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9router-gate admin</title>
+<style>
+  :root { color-scheme: light dark; --b: #8884; --muted: #888; --accent: #2563eb; --bad: #dc2626; }
+  * { box-sizing: border-box; }
+  html { background: Canvas; color: CanvasText; }
+  body { font: 14px/1.5 system-ui, sans-serif; max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  section { border: 1px solid var(--b); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  label { display: block; font-weight: 600; margin: 8px 0 4px; }
+  input[type=text], input[type=search] { width: 100%; padding: 6px 8px; border: 1px solid var(--b); border-radius: 6px; font: inherit; background: transparent; color: inherit; }
+  button { font: inherit; padding: 6px 12px; border: 1px solid var(--b); border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--bad); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .models { max-height: 240px; overflow: auto; border: 1px solid var(--b); border-radius: 6px; padding: 8px; margin-top: 6px; columns: 2 220px; }
+  .models label { font-weight: 400; margin: 0 0 2px; display: flex; gap: 6px; align-items: center; break-inside: avoid; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--b); vertical-align: top; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; }
+  code { font-size: 12px; word-break: break-all; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .off { opacity: .5; }
+  .num { font-variant-numeric: tabular-nums; }
+  #msg { min-height: 1.5em; }
+</style>
+</head>
+<body>
+<h1>9router-gate</h1>
+
+<section>
+  <h2 id="form-title">New key</h2>
+  <form id="form">
+    <input type="hidden" id="f-key">
+    <label for="f-name">Name</label>
+    <input type="text" id="f-name" required autocomplete="off">
+    <label for="f-filter">Models</label>
+    <input type="search" id="f-filter" placeholder="Filter models">
+    <div class="models" id="f-models" role="group" aria-label="Allowed models"></div>
+    <label for="f-extra">Extra patterns (comma separated, e.g. <code>kr/*</code>)</label>
+    <input type="text" id="f-extra" autocomplete="off">
+    <div class="row">
+      <button type="submit" class="primary">Save</button>
+      <button type="button" id="f-cancel" hidden>Cancel</button>
+      <span id="msg" role="status" aria-live="polite"></span>
+    </div>
+  </form>
+</section>
+
+<section>
+  <h2>Keys</h2>
+  <table>
+    <thead><tr><th>Name / key</th><th>Models</th><th>Usage</th><th><span class="muted">Actions</span></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <p class="muted">Usage is kept in memory and resets when the gate restarts.</p>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const el = (tag, props = {}, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids); return n; };
+let upstream = [];
+let state = [];
+
+const api = async (path, opts = {}) => {
+  const res = await fetch(location.origin + '/admin/api/' + path, { ...opts, headers: { 'Content-Type': 'application/json' } });
+  if (!res.ok) throw new Error(await res.text());
+  return res.status === 204 ? null : res.json();
+};
+const say = (t) => { $('msg').textContent = t; };
+
+function renderModels(selected = []) {
+  const box = $('f-models');
+  box.replaceChildren(...upstream.map((m) =>
+    el('label', {}, el('input', { type: 'checkbox', value: m, checked: selected.includes(m) }), m)));
+  $('f-extra').value = selected.filter((m) => !upstream.includes(m)).join(', ');
+  filter();
+}
+
+function filter() {
+  const q = $('f-filter').value.toLowerCase();
+  for (const l of $('f-models').children) l.hidden = !l.textContent.toLowerCase().includes(q);
+}
+
+function resetForm() {
+  $('form-title').textContent = 'New key';
+  $('f-key').value = '';
+  $('f-name').value = '';
+  $('f-cancel').hidden = true;
+  renderModels();
+}
+
+function edit(row) {
+  $('form-title').textContent = 'Edit ' + row.client.name;
+  $('f-key').value = row.key;
+  $('f-name').value = row.client.name;
+  $('f-cancel').hidden = false;
+  renderModels(row.client.models || []);
+  $('f-name').focus();
+}
+
+async function save(row, patch) {
+  await api('keys', { method: 'POST', body: JSON.stringify({ key: row.key, ...row.client, ...patch }) });
+  await load();
+}
+
+function renderRows() {
+  state.sort((a, b) => a.client.name.localeCompare(b.client.name));
+  $('rows').replaceChildren(...state.map((row) => {
+    const u = row.usage || { allowed: 0, denied: 0, models: {} };
+    const top = Object.entries(u.models || {}).sort((a, b) => b[1] - a[1]).map(([m, n]) => `${m}: ${n}`).join(', ');
+    const copy = el('button', { type: 'button', textContent: 'Copy key', onclick: async () => { await navigator.clipboard.writeText(row.key); say('Key copied'); } });
+    const toggle = el('button', { type: 'button', textContent: row.client.disabled ? 'Enable' : 'Disable', onclick: () => save(row, { disabled: !row.client.disabled }) });
+    const del = el('button', { type: 'button', className: 'danger', textContent: 'Delete', onclick: async () => {
+      if (!confirm(`Delete key for ${row.client.name}? Clients using it will stop working.`)) return;
+      await api('keys?key=' + encodeURIComponent(row.key), { method: 'DELETE' });
+      await load();
+    } });
+    return el('tr', { className: row.client.disabled ? 'off' : '' },
+      el('td', {}, el('strong', { textContent: row.client.name + (row.client.disabled ? ' (disabled)' : '') }), el('br'), el('code', { textContent: row.key.slice(0, 16) + '…' })),
+      el('td', {}, el('code', { textContent: (row.client.models || []).join(', ') || '(none)' })),
+      el('td', { className: 'num' }, `${u.allowed} ok / ${u.denied} denied`, el('br'),
+        el('span', { className: 'muted', textContent: u.last_used && u.allowed + u.denied ? 'Last: ' + new Date(u.last_used).toLocaleString() : 'Never used' }),
+        top ? el('div', { className: 'muted', textContent: top }) : ''),
+      el('td', {}, el('div', { className: 'row', style: 'margin:0' },
+        el('button', { type: 'button', textContent: 'Edit', onclick: () => edit(row) }), copy, toggle, del)));
+  }));
+}
+
+async function load() {
+  state = await api('state');
+  renderRows();
+}
+
+$('f-filter').addEventListener('input', filter);
+$('f-cancel').addEventListener('click', resetForm);
+$('form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const models = [...$('f-models').querySelectorAll('input:checked')].map((i) => i.value)
+    .concat($('f-extra').value.split(',').map((s) => s.trim()).filter(Boolean));
+  const key = $('f-key').value;
+  const prev = state.find((r) => r.key === key);
+  try {
+    const res = await api('keys', { method: 'POST', body: JSON.stringify({ key, name: $('f-name').value, models, disabled: prev?.client.disabled || false }) });
+    if (!key) { await navigator.clipboard.writeText(res.key).catch(() => {}); say('Created. Key copied: ' + res.key); }
+    else say('Saved');
+    resetForm();
+    await load();
+  } catch (err) { say('Error: ' + err.message); }
+});
+
+(async () => {
+  try { upstream = await api('models'); } catch (err) { say('Could not load 9router models: ' + err.message); }
+  resetForm();
+  await load();
+})();
+</script>
+</body>
+</html>
